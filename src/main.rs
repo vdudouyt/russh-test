@@ -87,30 +87,26 @@ impl server::Handler for Server {
         channel: Channel<Msg>,
         session: &mut Session,
     ) -> Result<bool, Self::Error> {
-        let cmd = Command::new("/bin/sh")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut stdin = cmd.stdin.unwrap();
-        let mut stdout = cmd.stdout.unwrap();
-        let mut channel = channel;
-        let mut cin = channel.make_writer();
-
-        let task1 = async move {
-            tokio::io::copy(&mut stdout, &mut cin).await.unwrap();
-            std::mem::drop(cin);
-            info!("drop 1");
-        };
-
-        let task2 = async move {
-            let mut cout = channel.make_reader();
-            tokio::io::copy(&mut cout, &mut stdin).await;
-            std::mem::drop(cout);
-            info!("drop 2");
-        };
-
         tokio::spawn(async move {
+           let cmd = Command::new("/root/greeter.pl")
+               .stdin(Stdio::piped())
+               .stdout(Stdio::piped())
+               .spawn()
+               .unwrap();
+           let mut channel = channel;
+           let mut stdin = cmd.stdin.unwrap();
+           let mut stdout = cmd.stdout.unwrap();
+           let mut cin = channel.make_writer();
+           let mut cout = channel.make_reader();
+   
+           let task1 = async move {
+               tokio::io::copy(&mut stdout, &mut cin).await;
+           };
+   
+           let task2 = async move {
+               tokio::io::copy(&mut cout, &mut stdin).await;
+           };
+
            tokio::select! {
                v = task1 => {
                    info!("task1 completed first");
@@ -119,6 +115,8 @@ impl server::Handler for Server {
                    info!("task2 completed first");
                }
            };
+           info!("channel.close()");
+           channel.close().await;
         });
 
         info!("channel_open_session");
