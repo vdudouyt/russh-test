@@ -3,28 +3,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use russh::keys::*;
-use russh_keys::key::KeyPair::Ed25519;
 use russh::server::{Msg, Server as _, Session};
 use russh::*;
 use tokio::sync::Mutex;
 use log::info;
-use tokio::process::Command;
-use std::process::Stdio;
-
-static SERVER_KEY_PATH : &str = "/tmp/russh-test.key";
-
-fn provide_server_key() -> std::io::Result<russh_keys::key::KeyPair> {
-    let key = if let Ok(bytes) = std::fs::read(SERVER_KEY_PATH) {
-        ed25519_dalek::SigningKey::from_bytes(&bytes.try_into().expect("invalid key length"))
-    } else if let Ed25519(newkey) = russh_keys::key::KeyPair::generate_ed25519() {
-        std::fs::write(SERVER_KEY_PATH, newkey.as_bytes())?;
-        newkey
-    } else {
-        panic!("Key generation failed");
-    };
-
-    Ok(Ed25519(key))
-}
 
 #[tokio::main]
 async fn main() {
@@ -32,13 +14,12 @@ async fn main() {
         .filter_level(log::LevelFilter::Info)
         .init();
 
-    let mykey = provide_server_key().unwrap();
     let config = russh::server::Config {
         inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
         auth_rejection_time: std::time::Duration::from_secs(0),
         auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
         methods: russh::MethodSet::PASSWORD,
-        keys: vec![ mykey ],
+        keys: vec![russh_keys::key::KeyPair::generate_ed25519()],
         ..Default::default()
     };
     let config = Arc::new(config);
@@ -87,52 +68,11 @@ impl server::Handler for Server {
         channel: Channel<Msg>,
         session: &mut Session,
     ) -> Result<bool, Self::Error> {
-        let cmd = Command::new("/bin/sh")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut stdin = cmd.stdin.unwrap();
-        let mut stdout = cmd.stdout.unwrap();
-        let mut channel = channel;
-        let mut cin = channel.make_writer();
-
-        let task1 = async move {
-            tokio::io::copy(&mut stdout, &mut cin).await.unwrap();
-            std::mem::drop(cin);
-            info!("drop 1");
-        };
-
-        let task2 = async move {
-            let mut cout = channel.make_reader();
-            tokio::io::copy(&mut cout, &mut stdin).await;
-            std::mem::drop(cout);
-            info!("drop 2");
-        };
-
-        tokio::spawn(async move {
-           tokio::select! {
-               v = task1 => {
-                   info!("task1 completed first");
-               }
-               v = task2 => {
-                   info!("task2 completed first");
-               }
-           };
-        });
-
-        info!("channel_open_session");
+        {
+            let mut clients = self.clients.lock().await;
+            clients.insert((self.id, channel.id()), session.handle());
+        }
         Ok(true)
-    }
-
-    async fn exec_request(
-        &mut self,
-        channel: ChannelId,
-        data: &[u8],
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        info!("exec_request(\"{}\")", String::from_utf8_lossy(data));
-        Ok(())
     }
 
     async fn auth_password(
@@ -142,5 +82,42 @@ impl server::Handler for Server {
     ) -> Result<server::Auth, Self::Error> {
         info!("auth_password: {}:{}", user, password);
         Ok(server::Auth::Accept)
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        // Sending Ctrl+C ends the session and disconnects the client
+        if data == [3] {
+            return Err(russh::Error::Disconnect);
+        }
+
+        let data = CryptoVec::from(format!("Got data: {}\r\n", String::from_utf8_lossy(data)));
+        self.post(data.clone()).await;
+        session.data(channel, data);
+        Ok(())
+    }
+
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        port: &mut u32,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        let handle = session.handle();
+        let address = address.to_string();
+        let port = *port;
+        tokio::spawn(async move {
+            let channel = handle
+                .channel_open_forwarded_tcpip(address, port, "1.2.3.4", 1234)
+                .await
+                .unwrap();
+            let _ = channel.data(&b"Hello from a forwarded port"[..]).await;
+            let _ = channel.eof().await;
+        });
+        Ok(true)
     }
 }

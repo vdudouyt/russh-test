@@ -8,8 +8,6 @@ use russh::server::{Msg, Server as _, Session};
 use russh::*;
 use tokio::sync::Mutex;
 use log::info;
-use tokio::process::Command;
-use std::process::Stdio;
 
 static SERVER_KEY_PATH : &str = "/tmp/russh-test.key";
 
@@ -87,40 +85,10 @@ impl server::Handler for Server {
         channel: Channel<Msg>,
         session: &mut Session,
     ) -> Result<bool, Self::Error> {
-        let cmd = Command::new("/bin/sh")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut stdin = cmd.stdin.unwrap();
-        let mut stdout = cmd.stdout.unwrap();
-        let mut channel = channel;
-        let mut cin = channel.make_writer();
-
-        let task1 = async move {
-            tokio::io::copy(&mut stdout, &mut cin).await.unwrap();
-            std::mem::drop(cin);
-            info!("drop 1");
-        };
-
-        let task2 = async move {
-            let mut cout = channel.make_reader();
-            tokio::io::copy(&mut cout, &mut stdin).await;
-            std::mem::drop(cout);
-            info!("drop 2");
-        };
-
-        tokio::spawn(async move {
-           tokio::select! {
-               v = task1 => {
-                   info!("task1 completed first");
-               }
-               v = task2 => {
-                   info!("task2 completed first");
-               }
-           };
-        });
-
+        {
+            let mut clients = self.clients.lock().await;
+            clients.insert((self.id, channel.id()), session.handle());
+        }
         info!("channel_open_session");
         Ok(true)
     }
@@ -135,6 +103,30 @@ impl server::Handler for Server {
         Ok(())
     }
 
+    async fn pty_request(
+        &mut self,
+        channel: ChannelId,
+        _term: &str,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        info!("pty request");
+        //let _ = session.handle().data(channel, CryptoVec::from(format!("Not allowed\r\n"))).await;
+        //session.data(channel, CryptoVec::from(format!("Not allowed\r\n")));
+        let h = session.handle();
+        let _ = h.data(channel, CryptoVec::from(format!("Not allowed\r\n"))).await;
+        let _ = h.data(channel, CryptoVec::from(format!("Not allowed 2\r\n"))).await;
+        h.close(channel).await;
+        //session.data(channel, CryptoVec::from(format!("Not allowed\r\n")));
+        //session.data(channel, CryptoVec::from(format!("Not allowed2\r\n")));
+        //session.eof(channel);
+        Ok(())
+    }
+
     async fn auth_password(
         &mut self,
         user: &str,
@@ -142,5 +134,22 @@ impl server::Handler for Server {
     ) -> Result<server::Auth, Self::Error> {
         info!("auth_password: {}:{}", user, password);
         Ok(server::Auth::Accept)
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        // Sending Ctrl+C ends the session and disconnects the client
+        if data == [3] {
+            return Err(russh::Error::Disconnect);
+        }
+
+        let data = CryptoVec::from(format!("Got data: {}\r\n", String::from_utf8_lossy(data)));
+        self.post(data.clone()).await;
+        session.data(channel, data);
+        Ok(())
     }
 }

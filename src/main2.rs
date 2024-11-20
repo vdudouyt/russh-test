@@ -87,7 +87,7 @@ impl server::Handler for Server {
         channel: Channel<Msg>,
         session: &mut Session,
     ) -> Result<bool, Self::Error> {
-        let cmd = Command::new("/bin/sh")
+        let cmd = Command::new("/root/greeter.pl")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()

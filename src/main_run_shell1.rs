@@ -87,7 +87,7 @@ impl server::Handler for Server {
         channel: Channel<Msg>,
         session: &mut Session,
     ) -> Result<bool, Self::Error> {
-        let cmd = Command::new("/bin/sh")
+        let cmd = Command::new("/root/greeter.pl")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -97,28 +97,13 @@ impl server::Handler for Server {
         let mut channel = channel;
         let mut cin = channel.make_writer();
 
-        let task1 = async move {
+        tokio::spawn(async move {
             tokio::io::copy(&mut stdout, &mut cin).await.unwrap();
-            std::mem::drop(cin);
-            info!("drop 1");
-        };
-
-        let task2 = async move {
-            let mut cout = channel.make_reader();
-            tokio::io::copy(&mut cout, &mut stdin).await;
-            std::mem::drop(cout);
-            info!("drop 2");
-        };
+        });
 
         tokio::spawn(async move {
-           tokio::select! {
-               v = task1 => {
-                   info!("task1 completed first");
-               }
-               v = task2 => {
-                   info!("task2 completed first");
-               }
-           };
+            let mut cout = channel.make_reader();
+            tokio::io::copy(&mut cout, &mut stdin).await.unwrap();
         });
 
         info!("channel_open_session");
